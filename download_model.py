@@ -1,13 +1,16 @@
-import os
-import gdown
+FROM python:3.11-slim
 
-MODEL_ID = os.environ.get("MODEL_ID")
-OUT = "cnn_respiratory_model.h5"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
 
-if not os.path.exists(OUT):
-    if not MODEL_ID:
-        raise RuntimeError("MODEL_ID env var not set")
-    url = f"https://drive.google.com/uc?id={MODEL_ID}"
-    gdown.download(url, OUT, quiet=False)
-else:
-    print("Model already exists")
+WORKDIR /app
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . /app
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
