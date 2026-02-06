@@ -4,25 +4,44 @@ import os, tempfile
 import joblib
 from tensorflow.keras.models import load_model
 import librosa
-import gdown
+import requests
 
-MODEL_ID = os.environ.get("MODEL_ID")
-
-def download_model_if_needed():
-    if not os.path.exists(MODEL_PATH):
-        if not MODEL_ID:
-            raise RuntimeError("MODEL_ID env var not set")
-        url = f"https://drive.google.com/uc?id={MODEL_ID}"
-        gdown.download(url, MODEL_PATH, quiet=False)
-
-
-app = FastAPI(title="Respiratory Audio CNN API")
-
+# =========================
+# Config
+# =========================
+MODEL_URL = os.environ.get("MODEL_URL")  # <-- put GitHub release direct URL here
 MODEL_PATH = "cnn_respiratory_model.h5"
 ENCODER_PATH = "label_encoder.pkl"
 
+# =========================
+# App
+# =========================
+app = FastAPI(title="Respiratory Audio CNN API")
+
 model = None
 label_encoder = None
+
+# =========================
+# Helpers
+# =========================
+def download_model_if_needed():
+    """
+    Download model from MODEL_URL only if it's not already present locally.
+    Works with GitHub Releases direct download URLs.
+    """
+    if os.path.exists(MODEL_PATH):
+        return
+
+    if not MODEL_URL:
+        raise RuntimeError("MODEL_URL env var not set")
+
+    r = requests.get(MODEL_URL, stream=True, timeout=120)
+    r.raise_for_status()
+
+    with open(MODEL_PATH, "wb") as f:
+        for chunk in r.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                f.write(chunk)
 
 def extract_features(y: np.ndarray, sr: int) -> np.ndarray:
     mfcc = np.mean(librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40).T, axis=0)
@@ -42,19 +61,28 @@ def load_audio_20s(path: str, target_sr=22050, seconds=20.0):
         y = np.pad(y, (0, target_len - len(y)), mode="constant")
     return y, sr
 
+# =========================
+# Startup
+# =========================
 @app.on_event("startup")
 def startup():
     global model, label_encoder
 
+    # 1) Ensure model exists (download if missing)
     download_model_if_needed()
 
+    # 2) Ensure encoder exists (must be in repo)
     if not os.path.exists(ENCODER_PATH):
         raise RuntimeError(f"Encoder not found: {ENCODER_PATH}")
 
-    model = load_model(MODEL_PATH)
+    # 3) Load model + encoder
+    # compile=False fixes some Keras/TF version deserialization issues
+    model = load_model(MODEL_PATH, compile=False)
     label_encoder = joblib.load(ENCODER_PATH)
 
-
+# =========================
+# Routes
+# =========================
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -74,6 +102,7 @@ async def predict_audio(file: UploadFile = File(...)):
 
         y, sr = load_audio_20s(tmp_path, target_sr=22050, seconds=20.0)
         feat = extract_features(y, sr)
+
         if feat.shape[0] != 193:
             raise HTTPException(status_code=400, detail=f"Expected 193 features, got {feat.shape[0]}")
 
@@ -100,8 +129,12 @@ async def predict_audio(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
     finally:
         if tmp_path and os.path.exists(tmp_path):
-            try: os.remove(tmp_path)
-            except: pass
+            try:
+                os.remove(tmp_path)
+            except:
+                pass
+
+
 
 
 
