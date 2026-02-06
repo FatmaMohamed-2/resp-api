@@ -4,6 +4,17 @@ import os, tempfile
 import joblib
 from tensorflow.keras.models import load_model
 import librosa
+import gdown
+
+MODEL_ID = os.environ.get("MODEL_ID")
+
+def download_model_if_needed():
+    if not os.path.exists(MODEL_PATH):
+        if not MODEL_ID:
+            raise RuntimeError("MODEL_ID env var not set")
+        url = f"https://drive.google.com/uc?id={MODEL_ID}"
+        gdown.download(url, MODEL_PATH, quiet=False)
+
 
 app = FastAPI(title="Respiratory Audio CNN API")
 
@@ -33,13 +44,18 @@ def load_audio_20s(path: str, target_sr=22050, seconds=20.0):
 
 @app.on_event("startup")
 def startup():
+  @app.on_event("startup")
+def startup():
     global model, label_encoder
-    if not os.path.exists(MODEL_PATH):
-        raise RuntimeError(f"Model not found: {MODEL_PATH}")
+
+    download_model_if_needed()
+
     if not os.path.exists(ENCODER_PATH):
-        raise RuntimeError(f"Encoder not found: {ENCODER_PATH}")
+        raise RuntimeError("Encoder not found")
+
     model = load_model(MODEL_PATH)
     label_encoder = joblib.load(ENCODER_PATH)
+
 
 @app.get("/health")
 def health():
@@ -88,5 +104,6 @@ async def predict_audio(file: UploadFile = File(...)):
         if tmp_path and os.path.exists(tmp_path):
             try: os.remove(tmp_path)
             except: pass
+
 
 
