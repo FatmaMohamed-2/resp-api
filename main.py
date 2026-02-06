@@ -1,17 +1,23 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 import numpy as np
-import os, tempfile
+import os, tempfile, subprocess
 import joblib
 from tensorflow.keras.models import load_model
 import librosa
 import requests
 
 # =========================
-# Config
+# Config (ENV)
 # =========================
-MODEL_URL = os.environ.get("MODEL_URL")  # <-- put GitHub release direct URL here
-MODEL_PATH = "cnn_respiratory_model.h5"
-ENCODER_PATH = "label_encoder.pkl"
+MODEL_URL = os.getenv("MODEL_URL")  # direct download URL (GitHub Release asset)
+ENCODER_URL = os.getenv("ENCODER_URL")  # optional: direct url for encoder (or keep in repo)
+
+MODEL_PATH = os.getenv("MODEL_PATH", "cnn_respiratory_model.h5")
+ENCODER_PATH = os.getenv("ENCODER_PATH", "label_encoder.pkl")
+
+TARGET_SR = int(os.getenv("TARGET_SR", "22050"))
+SECONDS = float(os.getenv("SECONDS", "20.0"))
+EXPECTED_FEATURES = int(os.getenv("EXPECTED_FEATURES", "193"))
 
 # =========================
 # App
@@ -21,27 +27,78 @@ app = FastAPI(title="Respiratory Audio CNN API")
 model = None
 label_encoder = None
 
-# =========================
-# Helpers
-# =========================
-def download_model_if_needed():
-    """
-    Download model from MODEL_URL only if it's not already present locally.
-    Works with GitHub Releases direct download URLs.
-    """
-    if os.path.exists(MODEL_PATH):
-        return
 
+# =========================
+# Download helpers
+# =========================
+def _download_file(url: str, out_path: str, timeout: int = 180):
+    if not url:
+        raise RuntimeError("Download URL not set")
+
+    # simple retry
+    for attempt in range(3):
+        try:
+            with requests.get(url, stream=True, timeout=timeout) as r:
+                r.raise_for_status()
+                with open(out_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+            return
+        except Exception as e:
+            if attempt == 2:
+                raise RuntimeError(f"Failed downloading {url}: {e}")
+
+def download_model_if_needed():
+    if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 5_000_000:
+        return
     if not MODEL_URL:
         raise RuntimeError("MODEL_URL env var not set")
+    _download_file(MODEL_URL, MODEL_PATH)
 
-    r = requests.get(MODEL_URL, stream=True, timeout=120)
-    r.raise_for_status()
+def download_encoder_if_needed():
+    if os.path.exists(ENCODER_PATH) and os.path.getsize(ENCODER_PATH) > 10:
+        return
+    # If encoder is in repo, no need for URL
+    if ENCODER_URL:
+        _download_file(ENCODER_URL, ENCODER_PATH)
+    if not os.path.exists(ENCODER_PATH):
+        raise RuntimeError(f"Encoder not found: {ENCODER_PATH} (upload it or set ENCODER_URL)")
 
-    with open(MODEL_PATH, "wb") as f:
-        for chunk in r.iter_content(chunk_size=1024 * 1024):
-            if chunk:
-                f.write(chunk)
+
+# =========================
+# Audio helpers
+# =========================
+def convert_to_wav_22050_mono(input_path: str, output_path: str):
+    """
+    Convert ANY audio type (m4a/aac/3gp/mp3/...) -> wav mono 22050 using ffmpeg.
+    """
+    cmd = ["ffmpeg", "-y", "-i", input_path, "-ac", "1", "-ar", str(TARGET_SR), output_path]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if p.returncode != 0:
+        raise RuntimeError("ffmpeg conversion failed: " + p.stderr.decode(errors="ignore"))
+
+def load_audio_20s_any_format(path: str):
+    """
+    Always convert to wav first then load with librosa.
+    Guarantees consistent SR/mono for mobile recordings.
+    """
+    tmp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+    try:
+        convert_to_wav_22050_mono(path, tmp_wav)
+        y, sr = librosa.load(tmp_wav, sr=TARGET_SR, mono=True)
+        target_len = int(SECONDS * sr)
+        if len(y) > target_len:
+            y = y[:target_len]
+        elif len(y) < target_len:
+            y = np.pad(y, (0, target_len - len(y)), mode="constant")
+        return y, sr
+    finally:
+        try:
+            if os.path.exists(tmp_wav):
+                os.remove(tmp_wav)
+        except:
+            pass
 
 def extract_features(y: np.ndarray, sr: int) -> np.ndarray:
     mfcc = np.mean(librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40).T, axis=0)
@@ -49,17 +106,10 @@ def extract_features(y: np.ndarray, sr: int) -> np.ndarray:
     mel = np.mean(librosa.feature.melspectrogram(y=y, sr=sr).T, axis=0)
     contrast = np.mean(librosa.feature.spectral_contrast(y=y, sr=sr).T, axis=0)
     tonnetz = np.mean(librosa.feature.tonnetz(y=librosa.effects.harmonic(y), sr=sr).T, axis=0)
+
     feat = np.hstack([mfcc, chroma, mel, contrast, tonnetz]).astype(np.float32)  # 193
     return feat
 
-def load_audio_20s(path: str, target_sr=22050, seconds=20.0):
-    y, sr = librosa.load(path, sr=target_sr, mono=True)
-    target_len = int(seconds * sr)
-    if len(y) > target_len:
-        y = y[:target_len]
-    elif len(y) < target_len:
-        y = np.pad(y, (0, target_len - len(y)), mode="constant")
-    return y, sr
 
 # =========================
 # Startup
@@ -68,45 +118,61 @@ def load_audio_20s(path: str, target_sr=22050, seconds=20.0):
 def startup():
     global model, label_encoder
 
-    # 1) Ensure model exists (download if missing)
+    # 1) Download assets if needed
     download_model_if_needed()
+    download_encoder_if_needed()
 
-    # 2) Ensure encoder exists (must be in repo)
-    if not os.path.exists(ENCODER_PATH):
-        raise RuntimeError(f"Encoder not found: {ENCODER_PATH}")
+    # 2) Load model + encoder
+    # IMPORTANT: compile=False
+    try:
+        model = load_model(MODEL_PATH, compile=False)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load model from {MODEL_PATH}: {e}")
 
-    # 3) Load model + encoder
-    # compile=False fixes some Keras/TF version deserialization issues
-    model = load_model(MODEL_PATH, compile=False)
-    label_encoder = joblib.load(ENCODER_PATH)
+    try:
+        label_encoder = joblib.load(ENCODER_PATH)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load encoder from {ENCODER_PATH}: {e}")
+
 
 # =========================
 # Routes
 # =========================
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "model_exists": os.path.exists(MODEL_PATH),
+        "encoder_exists": os.path.exists(ENCODER_PATH),
+        "target_sr": TARGET_SR,
+        "seconds": SECONDS,
+        "expected_features": EXPECTED_FEATURES
+    }
 
 @app.post("/predict_audio")
 async def predict_audio(file: UploadFile = File(...)):
     if model is None or label_encoder is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
 
-    suffix = os.path.splitext(file.filename or "")[1].lower() or ".wav"
-    tmp_path = None
+    suffix = os.path.splitext(file.filename or "")[1].lower() or ".bin"
+    tmp_in = None
 
     try:
+        # Save upload
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp_path = tmp.name
+            tmp_in = tmp.name
             tmp.write(await file.read())
 
-        y, sr = load_audio_20s(tmp_path, target_sr=22050, seconds=20.0)
+        # Load audio safely
+        y, sr = load_audio_20s_any_format(tmp_in)
+
+        # Features
         feat = extract_features(y, sr)
+        if feat.shape[0] != EXPECTED_FEATURES:
+            raise HTTPException(status_code=400, detail=f"Expected {EXPECTED_FEATURES} features, got {feat.shape[0]}")
 
-        if feat.shape[0] != 193:
-            raise HTTPException(status_code=400, detail=f"Expected 193 features, got {feat.shape[0]}")
-
-        x = feat.reshape(1, 193, 1)
+        # Model input
+        x = feat.reshape(1, EXPECTED_FEATURES, 1)
         probs = np.array(model.predict(x, verbose=0)[0], dtype=np.float32)
 
         pred_idx = int(np.argmax(probs))
@@ -116,7 +182,8 @@ async def predict_audio(file: UploadFile = File(...)):
         prob_dict = {}
         try:
             for i, name in enumerate(list(label_encoder.classes_)):
-                prob_dict[str(name)] = float(probs[i])
+                if i < len(probs):
+                    prob_dict[str(name)] = float(probs[i])
         except Exception:
             for i in range(len(probs)):
                 prob_dict[f"class_{i}"] = float(probs[i])
@@ -128,11 +195,13 @@ async def predict_audio(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
     finally:
-        if tmp_path and os.path.exists(tmp_path):
+        if tmp_in and os.path.exists(tmp_in):
             try:
-                os.remove(tmp_path)
+                os.remove(tmp_in)
             except:
                 pass
+
+
 
 
 
