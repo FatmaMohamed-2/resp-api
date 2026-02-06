@@ -1,7 +1,8 @@
 fastapi
 uvicorn[standard]
 python-multipart
-numpy==1.26.4
+
+numpy
 scipy
 librosa
 soundfile
@@ -9,8 +10,7 @@ joblib
 gdown
 h5py
 
-tensorflow==2.15.0
-keras==2.15.0
+tensorflow==2.16.1
 
 
 
