@@ -2,14 +2,17 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 python-multipart==0.0.9
 
+requests==2.32.3
 numpy==1.26.4
-joblib==1.4.2
 
 librosa==0.10.2.post1
 soundfile==0.12.1
 
-tflite-runtime==2.14.0
-requests==2.32.3
+joblib==1.4.2
+scikit-learn==1.6.1
+
+tensorflow==2.20.0
+
 
 
 
