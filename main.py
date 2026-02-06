@@ -44,14 +44,12 @@ def load_audio_20s(path: str, target_sr=22050, seconds=20.0):
 
 @app.on_event("startup")
 def startup():
-  @app.on_event("startup")
-def startup():
     global model, label_encoder
 
     download_model_if_needed()
 
     if not os.path.exists(ENCODER_PATH):
-        raise RuntimeError("Encoder not found")
+        raise RuntimeError(f"Encoder not found: {ENCODER_PATH}")
 
     model = load_model(MODEL_PATH)
     label_encoder = joblib.load(ENCODER_PATH)
@@ -104,6 +102,7 @@ async def predict_audio(file: UploadFile = File(...)):
         if tmp_path and os.path.exists(tmp_path):
             try: os.remove(tmp_path)
             except: pass
+
 
 
 
