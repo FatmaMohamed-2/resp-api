@@ -104,8 +104,11 @@ def health():
         "model_path_exists": os.path.exists(MODEL_PATH),
         "encoder_exists": os.path.exists(ENCODER_PATH),
     }
+from fastapi import Response
 
-
+@app.head("/health")
+def health_head():
+    return Response(status_code=200)
 @app.post("/predict_audio")
 async def predict_audio(file: UploadFile = File(...)):
     if interpreter is None or label_encoder is None:
@@ -160,3 +163,4 @@ async def predict_audio(file: UploadFile = File(...)):
                 os.remove(tmp_path)
             except:
                 pass
+
