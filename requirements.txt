@@ -1,18 +1,16 @@
-
-
-soundfile
-
+fastapi
+uvicorn[standard]
+python-multipart
+numpy<2
+scipy
+librosa
+joblib
+h5py
 
 tensorflow==2.12.0
 keras==2.12.0
-h5py==3.8.0
-numpy<2
-python-multipart
-librosa
-joblib
-fastapi
-uvicorn
-requests
+
+
 
 
 
