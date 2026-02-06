@@ -9,8 +9,10 @@ soundfile
 joblib
 gdown
 h5py
+requests
 
 tensorflow==2.16.1
+
 
 
 
